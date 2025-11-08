@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RC Trka - Interaktivna Web Simulacija</title>
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:Arial,Helvetica,sans-serif}
+    #container{width:100%;height:100%;display:block;position:relative;overflow:hidden}
+    #overlay{position:absolute;left:12px;top:12px;z-index:20;background:rgba(0,0,0,0.45);padding:10px;border-radius:8px}
+    #overlay button{margin:4px;padding:8px 12px;border-radius:6px;border:none;background:#2b6;cursor:pointer;color:#072}
+    #overlay button.secondary{background:#268; color:#cfe}
+    #info{margin-top:8px;font-size:13px}
+    #leaderboard{position:absolute;right:12px;top:12px;z-index:20;background:rgba(0,0,0,0.45);padding:10px;border-radius:8px;font-size:14px}
+    #footer{position:absolute;left:12px;bottom:12px;z-index:20;background:rgba(0,0,0,0.25);padding:8px;border-radius:6px;font-size:13px}
+    .boat-label{font-weight:700}
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+  <div id="overlay">
+    <div>
+      <button id="startBtn">Pokreni trku</button>
+      <button id="pauseBtn" class="secondary">Pauza</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+    </div>
+    <div id="info">
+      <div>Krugovi: <span id="lapCount">0</span> / 5</div>
+      <div>Stanje: <span id="status">Spremno</span></div>
+    </div>
+  </div>
+  <div id="leaderboard">
+    <div style="font-weight:800;margin-bottom:6px">Poredak</div>
+    <ol id="board"></ol>
+  </div>
+  <div id="footer">Pogled iz ptičje perspektive • Zvuk motora i valova • Staza: 60 × 30 m</div>
+
+  <!-- Three.js from CDN -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+
+  <script>
+  // --- Osnovna postavka scene ---
+  const container = document.getElementById('container');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 80, 0);
+  camera.up.set(0,0,-1); // tako da pogled odozgo izgleda normalno
+  camera.lookAt(0,0,0);
+
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  container.appendChild(renderer.domElement);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableRotate = false; // fiksni ptičji pogled
+  controls.enablePan = true;
+  controls.minDistance = 20;
+  controls.maxDistance = 200;
+
+  // --- osvjetljenje ---
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+  dir.position.set(50,100,50);
+  scene.add(dir);
+  scene.add(new THREE.AmbientLight(0xffffff,0.4));
+
+  // --- Staza: oval 60 x 30 meter ---
+  const trackLength = 60; // x
+  const trackWidth = 30;  // z
+
+  // napravit ćemo CatmullRom krivulju za centralnu liniju staze
+  const pts = [];
+  // polukrug lijevo
+  for(let i=0;i<=20;i++){
+    const a = Math.PI*(i/20)+Math.PI/2;
+    const x = (trackLength/2)*Math.cos(a);
+    const z = (trackWidth/2)*Math.sin(a);
+    pts.push(new THREE.Vector3(x,0,z));
+  }
+  // polukrug desno
+  for(let i=0;i<=20;i++){
+    const a = Math.PI*(i/20)-Math.PI/2;
+    const x = (trackLength/2)*Math.cos(a);
+    const z = (trackWidth/2)*Math.sin(a);
+    pts.push(new THREE.Vector3(x,0,z));
+  }
+  const centerCurve = new THREE.CatmullRomCurve3(pts,true);
+
+  // vizualna staza - plutajuća ograda i bove
+  const outerGroup = new THREE.Group();
+  scene.add(outerGroup);
+
+  // plutajuća ograda - jednostruki torus oko staze
+  const rimGeo = new THREE.TubeGeometry(centerCurve,200,0.4,8,true);
+  const rimMat = new THREE.MeshStandardMaterial({color:0xff8c00,metalness:0.2,roughness:0.6});
+  const rimMesh = new THREE.Mesh(rimGeo,rimMat);
+  rimMesh.position.y = 0.2;
+  outerGroup.add(rimMesh);
+
+  // bove (marker buoys) - postavimo ih duž staze svakih 12 stupnjeva approx
+  const buoys = new THREE.Group();
+  const samples = 24;
+  for(let i=0;i<samples;i++){
+    const t = i/samples;
+    const p = centerCurve.getPointAt(t);
+    const buoy = new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.25,0.6,12), new THREE.MeshStandardMaterial({color: (i%2===0)?0xff0000:0xffffff}));
+    buoy.position.copy(p);
+    buoy.position.y = 0.3;
+    buoys.add(buoy);
+  }
+  outerGroup.add(buoys);
+
+  // start/cilj linija
+  const startP = centerCurve.getPointAt(0);
+  const startLineGeo = new THREE.BoxGeometry(0.15,0.05,6);
+  const startMat = new THREE.MeshStandardMaterial({color:0x000000});
+  const startLine = new THREE.Mesh(startLineGeo,startMat);
+  startLine.position.copy(startP);
+  startLine.position.y = 0.05;
+  scene.add(startLine);
+
+  // skakaonice - označit ćemo mjesta: t=0.15 i t=0.6
+  const jumps = [0.15,0.6];
+  const jumpMeshes = [];
+  jumps.forEach(t=>{
+    const p = centerCurve.getPointAt(t);
+    const plank = new THREE.Mesh(new THREE.BoxGeometry(2,0.12,1), new THREE.MeshStandardMaterial({color:0x8b4513}));
+    plank.position.copy(p);
+    plank.position.y = 0.06;
+    plank.rotation.y = Math.atan2(centerCurve.getTangent(t).z, centerCurve.getTangent(t).x);
+    scene.add(plank);
+    jumpMeshes.push(plank);
+  });
+
+  // voda - jednostavna deformacija plohe
+  const waterW = 300, waterH = 300;
+  const waterGeo = new THREE.PlaneGeometry(waterW, waterH, 200, 200);
+  waterGeo.rotateX(-Math.PI/2);
+  const waterMat = new THREE.MeshStandardMaterial({color:0x1e90ff, metalness:0.1, roughness:0.6, transparent:true, opacity:0.9});
+  const water = new THREE.Mesh(waterGeo, waterMat);
+  water.position.y = 0;
+  scene.add(water);
+
+  // mala mreža za obalu (vizualno)
+  const land = new THREE.Mesh(new THREE.PlaneGeometry(500,500), new THREE.MeshStandardMaterial({color:0x88aa66, side:THREE.DoubleSide}));
+  land.rotateX(-Math.PI/2);
+  land.position.y = -0.5;
+  scene.add(land);
+
+  // --- Brodovi ---
+  const colors = [0xff3333,0x3366ff,0x33cc33,0xffdd33,0x222222];
+  const names = ['Red Fury','Blue Wave','Green Hornet','Golden Jet','Black Storm'];
+  const boats = [];
+  const boatGroup = new THREE.Group();
+  scene.add(boatGroup);
+
+  for(let i=0;i<5;i++){
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.8,0.25,0.6), new THREE.MeshStandardMaterial({color:colors[i],metalness:0.3,roughness:0.5}));
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.18,0.4), new THREE.MeshStandardMaterial({color:0xffffff,metalness:0.2,roughness:0.4}));
+    cabin.position.set(0,0.2,0);
+    hull.add(cabin);
+    hull.position.y = 0.2;
+    // label
+    hull.userData = {name:names[i],t: i*0.02,lap:0}; // t - pozicija duž staze
+    boatGroup.add(hull);
+    boats.push(hull);
+  }
+
+  // UI elementi
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const statusEl = document.getElementById('status');
+  const lapCountEl = document.getElementById('lapCount');
+  const boardEl = document.getElementById('board');
+
+  // trkački parametri
+  const totalLaps = 5;
+  let running = false, paused=false;
+  let startTime = 0;
+
+  // brzina parametra t -> kako brzo prelaze krug, prilagodimo da traje ~2.5 minute
+  // each lap = 1 in t units, so speed chosen to finish in desired time
+  const desiredDurationSec = 150; // 2.5 minute
+  const lapSeconds = desiredDurationSec/ (boats.length?1:1); // each lap overall time
+  const baseSpeed = 1 / (desiredDurationSec/ (totalLaps)); // t per second
+
+  // --- Audio - generiramo engine i valove preko WebAudio ---
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  // zajednički noise za valove
+  const waveGain = audioCtx.createGain(); waveGain.gain.value = 0.06; waveGain.connect(audioCtx.destination);
+  // create a buffer of noise
+  const bufferSize = 2*audioCtx.sampleRate;
+  const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random()*2-1)*0.5;
+  const noiseSource = audioCtx.createBufferSource();
+  noiseSource.buffer = noiseBuffer;
+  noiseSource.loop = true;
+  const noiseFilter = audioCtx.createBiquadFilter(); noiseFilter.type='lowpass'; noiseFilter.frequency.value=800;
+  noiseSource.connect(noiseFilter); noiseFilter.connect(waveGain);
+  // start when user interacts
+
+  // motor sounds per boat
+  const motors = [];
+  function createMotorSound(){
+    const gain = audioCtx.createGain(); gain.gain.value = 0.0; gain.connect(audioCtx.destination);
+    const osc = audioCtx.createOscillator(); osc.type='sawtooth'; osc.frequency.value = 80; // base
+    const filt = audioCtx.createBiquadFilter(); filt.type='lowpass'; filt.frequency.value = 1200;
+    osc.connect(filt); filt.connect(gain);
+    osc.start();
+    return {osc, gain, filt};
+  }
+  for(let i=0;i<boats.length;i++) motors.push(createMotorSound());
+
+  // resume audio on first user interaction
+  function resumeAudio(){
+    if(audioCtx.state==='suspended') audioCtx.resume();
+    if(!noiseSource.started){ noiseSource.start(); noiseSource.started=true; }
+  }
+  window.addEventListener('pointerdown', resumeAudio, {once:true});
+
+  // trkačka logika
+  let raceTime = 0;
+
+  function updateBoats(dt){
+    if(!running || paused) return;
+    raceTime += dt;
+    for(let i=0;i<boats.length;i++){
+      const b = boats[i];
+      // svi isti performansi, ali offset početne pozicije
+      let t = b.userData.t + baseSpeed * dt; // napredujemo za dt
+      // detect jumps - if t crosses a jump t, apply vertical hop
+      // we'll implement vertical offset based on proximity to jump points
+      // normalize t
+      t = t % 1;
+      // lap counting
+      if(b.userData.t > t) b.userData.lap +=1; // prešao je točku 0
+      b.userData.t = t;
+      const p = centerCurve.getPointAt(t);
+      const tang = centerCurve.getTangent(t);
+      b.position.set(p.x, 0, p.z);
+      // rotate to face direction (project tangent onto xz)
+      const angle = Math.atan2(tang.z, tang.x);
+      b.rotation.y = -angle;
+
+      // vertical jump effect if close to a jump point
+      let jumpY = 0;
+      for(const jt of jumps){
+        let diff = Math.abs(t - jt);
+        if(diff>0.5) diff = 1-diff;
+        if(diff < 0.03){
+          // hop
+          const f = 1 - (diff/0.03);
+          jumpY = Math.max(jumpY, Math.sin(f*Math.PI)*0.9);
+        }
+      }
+      b.position.y = 0.2 + jumpY;
+
+      // update motor sound pitch/volume
+      const motor = motors[i];
+      motor.osc.frequency.value = 70 + 200 * baseSpeed * 10; // coarse mapping
+      motor.gain.gain.value = 0.02 + 0.06 * baseSpeed; // small volume
+    }
+  }
+
+  function updateLeaderboard(){
+    // sort by completed laps then by t descending
+    const arr = boats.map(b => ({name:b.userData.name,lap:b.userData.lap,t:b.userData.t}));
+    arr.sort((a,b)=>{ if(a.lap!==b.lap) return b.lap-a.lap; return b.t - a.t; });
+    boardEl.innerHTML = '';
+    arr.forEach(x=>{
+      const li = document.createElement('li'); li.textContent = `${x.name} — Krugovi: ${x.lap}`; boardEl.appendChild(li);
+    });
+    // update lap counter display as max lap among boats
+    const maxLap = Math.max(...arr.map(a=>a.lap));
+    lapCountEl.textContent = Math.min(maxLap+1,totalLaps);
+    if(maxLap>=totalLaps) endRace();
+  }
+
+  function endRace(){
+    running = false;
+    statusEl.textContent = 'Završeno';
+    // stop audio gently
+    motors.forEach(m=>{ m.gain.gain.value = 0; });
+    waveGain.gain.value = 0.0;
+  }
+
+  // animacija valova (jednostavno pomicanje vertexa)
+  const baseVerts = [];
+  for(let i=0;i<waterGeo.attributes.position.count;i++) baseVerts.push(waterGeo.attributes.position.getY(i));
+  let tacc = 0;
+  function animate(time){
+    const dt = (time - (animate.last||time))/1000;
+    animate.last = time;
+    if(!paused) updateBoats(dt);
+
+    // waves
+    tacc += dt;
+    const pos = waterGeo.attributes.position;
+    for(let i=0;i<pos.count;i++){
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const y = Math.sin((x+ tacc*6)/6) * 0.15 + Math.cos((z+ tacc*4)/8)*0.12;
+      pos.setY(i, y);
+    }
+    pos.needsUpdate = true;
+
+    // update leaderboard
+    updateLeaderboard();
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // UI handlers
+  startBtn.addEventListener('click', ()=>{
+    running = true; paused=false; statusEl.textContent='U tijeku'; resumeAudio();
+    // ramp up wave sound
+    waveGain.gain.value = 0.06;
+  });
+  pauseBtn.addEventListener('click', ()=>{ paused = !paused; statusEl.textContent = paused? 'Pauzirano':'U tijeku'; });
+  resetBtn.addEventListener('click', ()=>{
+    running=false; paused=false; raceTime=0; statusEl.textContent='Spremno';
+    boats.forEach((b,i)=>{ b.userData.t = i*0.02; b.userData.lap = 0; b.position.y = 0.2; });
+    motors.forEach(m=>{ m.gain.gain.value=0; });
+    waveGain.gain.value = 0.0;
+  });
+
+  // responsive
+  window.addEventListener('resize', ()=>{ camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+  // inicijalni pozicioniranje brodova
+  boats.forEach((b,i)=>{ const p = centerCurve.getPointAt(b.userData.t); b.position.set(p.x,0.2,p.z); });
+
+  // poruke za korisnika
+  console.log('Simulacija spremna. Klikni "Pokreni trku" za start.');
+  </script>
+</body>
+</html>
